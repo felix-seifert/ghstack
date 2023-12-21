@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import NamedTuple, Optional
 
+import requests
+
 import ghstack.logs
 
 Config = NamedTuple(
@@ -16,7 +18,7 @@ Config = NamedTuple(
         # Proxy to use when making connections to GitHub
         ("proxy", Optional[str]),
         # OAuth token to authenticate to GitHub with
-        ("github_oauth", str),
+        ("github_oauth", Optional[str]),
         # GitHub username; used to namespace branches we create
         ("github_username", str),
         # Token to authenticate to CircleCI with
@@ -39,7 +41,11 @@ Config = NamedTuple(
 )
 
 
-def read_config(*, request_circle_token: bool = False) -> Config:  # noqa: C901
+def read_config(
+    *,
+    request_circle_token: bool = False,
+    request_github_token: bool = True,
+) -> Config:  # noqa: C901
     config = configparser.ConfigParser()
 
     config_path = None
@@ -67,9 +73,13 @@ def read_config(*, request_circle_token: bool = False) -> Config:  # noqa: C901
     if config.has_option("ghstack", "github_url"):
         github_url = config.get("ghstack", "github_url")
     else:
-        github_url = input("GitHub url [github.com]: ")
+        github_url = input("GitHub enterprise domain (leave blank for OSS GitHub): ")
         if not github_url:
             github_url = "github.com"
+        if not re.match(r"[\w\.-]+\.\w+$", github_url):
+            raise RuntimeError(
+                f"{github_url} is not a valid domain name (do not include http:// scheme)"
+            )
         config.set("ghstack", "github_url", github_url)
         write_back = True
 
@@ -84,12 +94,30 @@ def read_config(*, request_circle_token: bool = False) -> Config:  # noqa: C901
         )
     if github_oauth is None and config.has_option("ghstack", "github_oauth"):
         github_oauth = config.get("ghstack", "github_oauth")
-    if github_oauth is None:
-        github_oauth = getpass.getpass(
-            "GitHub OAuth token (make one at "
-            "https://{github_url}/settings/tokens -- "
-            "we need public_repo permissions): ".format(github_url=github_url)
-        ).strip()
+    if github_oauth is None and request_github_token:
+        print("Generating GitHub access token...")
+        CLIENT_ID = "89cc88ca50efbe86907a"
+        res = requests.post(
+            f"https://{github_url}/login/device/code",
+            headers={"Accept": "application/json"},
+            data={"client_id": CLIENT_ID, "scope": "public_repo"},
+        )
+        data = res.json()
+        print(f"User verification code: {data['user_code']}")
+        print("Go to https://github.com/login/device and enter the code.")
+        print("Once you've authorized ghstack, press any key to continue...")
+        input()
+
+        res = requests.post(
+            f"https://{github_url}/login/oauth/access_token",
+            headers={"Accept": "application/json"},
+            data={
+                "client_id": CLIENT_ID,
+                "device_code": data["device_code"],
+                "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            },
+        )
+        github_oauth = res.json()["access_token"]
         config.set("ghstack", "github_oauth", github_oauth)
         write_back = True
     if github_oauth is not None:
@@ -111,6 +139,18 @@ def read_config(*, request_circle_token: bool = False) -> Config:  # noqa: C901
     github_username = None
     if config.has_option("ghstack", "github_username"):
         github_username = config.get("ghstack", "github_username")
+    if github_username is None and github_oauth is not None:
+        res = requests.get(
+            f"https://api.{github_url}/user",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {github_oauth}",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        github_username = res.json()["login"]
+        config.set("ghstack", "github_username", github_username)
+        write_back = True
     if github_username is None:
         github_username = input("GitHub username: ")
         if not re.match(

@@ -91,7 +91,8 @@ class Shell(object):
         input: Optional[str] = None,
         stdin: _HANDLE = None,
         stdout: _HANDLE = subprocess.PIPE,
-        exitcode: bool = False
+        exitcode: bool = False,
+        tick: bool = False
     ) -> _SHELL_RET:
         """
         Run a command specified by args, and return string representing
@@ -116,6 +117,8 @@ class Shell(object):
                 code 0.  We never raise an exception when this is True.
         """
         assert not (stdin and input)
+        if tick:
+            self.test_tick()
         if input:
             stdin = subprocess.PIPE
         if not self.quiet:
@@ -197,14 +200,18 @@ class Shell(object):
         loop = asyncio.get_event_loop()
         returncode, out, err = loop.run_until_complete(run())
 
+        def decode(b: bytes) -> str:
+            return (
+                b.decode(errors="backslashreplace")
+                .replace("\0", "\\0")
+                .replace("\r\n", "\n")
+            )
+
         # NB: Not debug; we always want to show this to user.
         if err:
-            logging.debug("# stderr:\n" + err.decode(errors="backslashreplace"))
+            logging.debug("# stderr:\n" + decode(err))
         if out:
-            logging.debug(
-                ("# stdout:\n" if err else "")
-                + out.decode(errors="backslashreplace").replace("\0", "\\0")
-            )
+            logging.debug(("# stdout:\n" if err else "") + decode(out))
 
         if exitcode:
             logging.debug("Exit code: {}".format(returncode))
@@ -255,6 +262,10 @@ class Shell(object):
         env = kwargs.setdefault("env", {})
         # For git hooks to detect execution inside ghstack
         env.setdefault("GHSTACK", "1")
+        # For dealing with https://github.com/ezyang/ghstack/issues/174
+        env.setdefault(
+            "GIT_TERMINAL_PROMPT", os.environ.get("GIT_TERMINAL_PROMPT", "0")
+        )
         # Some envvars to make things a little more script mode nice
         if self.testing:
             env.setdefault("EDITOR", ":")

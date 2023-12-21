@@ -1,6 +1,6 @@
 import asyncio
 import contextlib
-from typing import Generator, List, Tuple
+from typing import Generator, List, Optional, Tuple
 
 import click
 
@@ -28,11 +28,16 @@ GhstackContext = Tuple[
 
 @contextlib.contextmanager
 def cli_context(
+    *,
     request_circle_token: bool = False,
+    request_github_token: bool = True,
 ) -> Generator[GhstackContext, None, None]:
     with EXIT_STACK:
         shell = ghstack.shell.Shell()
-        config = ghstack.config.read_config(request_circle_token=request_circle_token)
+        config = ghstack.config.read_config(
+            request_circle_token=request_circle_token,
+            request_github_token=request_github_token,
+        )
         github = ghstack.github_real.RealGitHubEndpoint(
             oauth_token=config.github_oauth,
             proxy=config.proxy,
@@ -52,6 +57,9 @@ def cli_context(
 @click.option("--force", is_flag=True, hidden=True)
 @click.option("--no-skip", is_flag=True, hidden=True)
 @click.option("--draft", is_flag=True, hidden=True)
+@click.option("--direct", is_flag=True, hidden=True)
+@click.option("--base", "-B", default=None, hidden=True)
+@click.option("--stack/--no-stack", "-s/-S", is_flag=True, default=True, hidden=True)
 def main(
     ctx: click.Context,
     debug: bool,
@@ -59,8 +67,11 @@ def main(
     update_fields: bool,
     short: bool,
     force: bool,
+    direct: bool,
     no_skip: bool,
     draft: bool,
+    base: Optional[str],
+    stack: bool,
 ) -> None:
     """
     Submit stacks of diffs to Github
@@ -68,7 +79,7 @@ def main(
     EXIT_STACK.enter_context(ghstack.logs.manager(debug=debug))
 
     if not ctx.invoked_subcommand:
-        return ctx.invoke(
+        ctx.invoke(
             submit,
             message=message,
             update_fields=update_fields,
@@ -76,6 +87,9 @@ def main(
             force=force,
             no_skip=no_skip,
             draft=draft,
+            base=base,
+            stack=stack,
+            direct=direct,
         )
 
 
@@ -101,7 +115,7 @@ def checkout(pull_request: str) -> None:
     """
     Checkout a PR
     """
-    with cli_context() as (shell, config, github):
+    with cli_context(request_github_token=False) as (shell, config, github):
         ghstack.checkout.main(
             pull_request=pull_request,
             github=github,
@@ -135,13 +149,13 @@ def land(force: bool, pull_request: str) -> None:
     help="Select the last command (not including rage commands) to report",
 )
 def rage(latest: bool) -> None:
-    with cli_context():
+    with cli_context(request_github_token=False):
         ghstack.rage.main(latest)
 
 
 @main.command("status")
 @click.argument("pull_request", metavar="PR")
-def status(pull_request: str):
+def status(pull_request: str) -> None:
     """
     Check status of a PR
     """
@@ -192,6 +206,33 @@ def status(pull_request: str):
     is_flag=True,
     help="Create the pull request in draft mode (only if it has not already been created)",
 )
+@click.option(
+    "--base",
+    "-B",
+    default=None,
+    help="Branch to base the stack off of; "
+    "defaults to the default branch of a repository",
+)
+@click.option(
+    "--stack/--no-stack",
+    "-s/-S",
+    is_flag=True,
+    default=True,
+    help="Submit the entire of stack of commits reachable from HEAD, versus only single commits.  "
+    "This affects the meaning of REVS.  With --stack, we submit all commits that "
+    "are reachable from REVS, excluding commits already on the base branch.  Revision ranges "
+    "supported by git rev-list are also supported.  "
+    "With --no-stack, we support only non-range identifiers, and will submit each commit "
+    "listed in the command line.",
+)
+@click.option(
+    "--direct", is_flag=True, help="Create stack that directly merges into master"
+)
+@click.argument(
+    "revs",
+    nargs=-1,
+    metavar="REVS",
+)
 def submit(
     message: str,
     update_fields: bool,
@@ -199,6 +240,10 @@ def submit(
     force: bool,
     no_skip: bool,
     draft: bool,
+    direct: bool,
+    base: Optional[str],
+    revs: Tuple[str, ...],
+    stack: bool,
 ) -> None:
     """
     Submit or update a PR stack
@@ -216,6 +261,10 @@ def submit(
             draft=draft,
             github_url=config.github_url,
             remote_name=config.remote_name,
+            base_opt=base,
+            revs=revs,
+            stack=stack,
+            direct=direct,
         )
 
 
